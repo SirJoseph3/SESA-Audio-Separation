@@ -204,6 +204,10 @@ def create_interface():
     .gradio-container [role="tabpanel"] {
         contain: layout style !important;
     }
+    /* Gorunmez trigger textbox: gr.render'i tetikler ama UI'da yer kaplamaz */
+    .sesa-hidden-trigger {
+        display: none !important;
+    }
     """
 
     # Load user config at startup
@@ -523,7 +527,19 @@ def create_interface():
                         # Model ciktilarinin (label, yol) listesi -> dinamik grid kaynagi
                         results_state = gr.State([])
 
-                        @gr.render(inputs=results_state)
+                        # Status textbox'i (gorunmez): her yield'de degisir; gr.render
+                        # icin TETIKLEYICI olarak kullanilir. Gradio 4.44'te gr.State'in
+                        # streaming guncellemesi gr.render'i tek basina tetiklemiyor,
+                        # bu yuzden acik bir .change trigger'i sart.
+                        separation_process_status = gr.Textbox(
+                            label=i18n("status"),
+                            interactive=False,
+                            placeholder=i18n("waiting_for_processing"),
+                            visible=True,
+                            elem_classes=["sesa-hidden-trigger"]
+                        )
+
+                        @gr.render(inputs=results_state, triggers=[separation_process_status.change])
                         def render_separation_outputs(results):
                             if not results:
                                 return
@@ -542,12 +558,6 @@ def create_interface():
                                 </div>
                             </div>
                             """
-                        )
-                        separation_process_status = gr.Textbox(
-                            label=i18n("status"),
-                            interactive=False,
-                            placeholder=i18n("waiting_for_processing"),
-                            visible=False
                         )
                         processing_tip = gr.Markdown(i18n("processing_tip"))
 
