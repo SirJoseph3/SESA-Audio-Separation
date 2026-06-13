@@ -15,6 +15,8 @@ from datetime import datetime
 from helpers import INPUT_DIR, OLD_OUTPUT_DIR, ENSEMBLE_DIR, AUTO_ENSEMBLE_TEMP, move_old_files, clear_directory, BASE_DIR, clean_model, extract_model_name_from_checkpoint, sanitize_filename, find_clear_segment, save_segment, run_matchering, clamp_percentage
 from model import get_model_config, get_model_chunk_size
 from apollo_processing import process_with_apollo  # Import Apollo processing
+from stem_outputs import derive_label, collect_outputs  # Dinamik cikti (label, yol) listesi
+from utils import load_config, prefer_target_instrument  # Model stem listesi (inference ile ayni kaynak)
 import torch
 
 # PyTorch optimized backend (always available)
@@ -383,22 +385,24 @@ def run_command_and_process_files(
             raise FileNotFoundError("No output files created in OUTPUT_DIR")
 
         def rename_files_with_model(folder, filename_model):
+            """Cikti dosyalarini kullanici-dostu adlandirir ama stem adini KORUR:
+            '{timestamp}_{taban}_{stem}_{model}{ext}'. Stem tespiti yapilmaz;
+            inference'in yazdigi '_{stem}' parcasi oldugu gibi tutulur."""
             timestamp = datetime.now().strftime("%d-%m-%Y_%H-%M")
             for filename in sorted(os.listdir(folder)):
                 file_path = os.path.join(folder, filename)
                 if not any(filename.lower().endswith(ext) for ext in ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a']):
                     continue
                 base, ext = os.path.splitext(filename)
-                detected_type = None
-                for type_key in ['vocals', 'instrumental', 'instrument', 'phaseremix', 'drum', 'bass', 'other', 'effects', 'speech', 'music', 'dry', 'male', 'female', 'bleed', 'karaoke', 'mid', 'side']:
-                    if type_key in base.lower():
-                        detected_type = type_key
-                        break
-                # Normalize 'instrument' to 'Instrumental' for consistency
-                type_suffix = 'Instrumental' if detected_type == 'instrument' else (detected_type.capitalize() if detected_type else "Processed")
-                clean_base = sanitize_filename(base.split('_')[0]).rsplit('.', 1)[0]
-                new_filename = f"{timestamp}_{clean_base}_{type_suffix}_{filename_model}{ext}"
+                # base genelde '{taban}_{stem}' formatinda; tabani ilk parcadan al,
+                # stem kismini oldugu gibi koru.
+                parts = base.split('_')
+                taban = sanitize_filename(parts[0]) if parts else "audio"
+                stem = '_'.join(parts[1:]) if len(parts) > 1 else "output"
+                new_filename = f"{timestamp}_{taban}_{stem}_{filename_model}{ext}"
                 new_file_path = os.path.join(folder, new_filename)
+                if new_file_path == file_path:
+                    continue
                 try:
                     os.rename(file_path, new_file_path)
                 except Exception as e:
@@ -406,32 +410,27 @@ def run_command_and_process_files(
 
         rename_files_with_model(OUTPUT_DIR, filename_model)
 
-        output_files = os.listdir(OUTPUT_DIR)
-        if not output_files:
-            raise FileNotFoundError("No output files in OUTPUT_DIR after renaming")
+        # Modelin gercek stem listesini config'den oku (inference ile ayni kaynak)
+        try:
+            _cfg = load_config(model_type, config_path)
+            model_instruments = list(prefer_target_instrument(_cfg))
+        except Exception as e:
+            print(f"Config instruments okunamadi, sadece dosya adlarindan turetilecek: {e}")
+            model_instruments = []
 
-        def find_file(keywords):
-            """Find file matching any of the keywords (can be single keyword or list)."""
-            if isinstance(keywords, str):
-                keywords = [keywords]
-            matching_files = [
-                os.path.join(OUTPUT_DIR, f) for f in output_files 
-                if any(kw in f.lower() for kw in keywords)
-            ]
-            return matching_files[0] if matching_files else None
+        # (label, yol) listesi uret
+        results = collect_outputs(OUTPUT_DIR, model_instruments)
+        if not results:
+            raise FileNotFoundError("No usable output audio files in OUTPUT_DIR")
 
-        output_list = [
-            find_file('vocals'), find_file(['instrumental', 'instrument']), find_file('phaseremix'),
-            find_file('drum'), find_file('bass'), find_file('other'), find_file('effects'),
-            find_file('speech'), find_file('music'), find_file('dry'), find_file('male'),
-            find_file('female'), find_file('bleed'), find_file('karaoke'),
-            find_file('mid'), find_file('side')
-        ]
-
-        normalized_outputs = []
-        for output_file in output_list:
+        # Normalize: her dosyayi secilen output_format'a cevir, label'i koru
+        normalized_results = []
+        for label, output_file in results:
             if output_file and os.path.exists(output_file):
-                normalized_file = os.path.join(OUTPUT_DIR, f"{sanitize_filename(os.path.splitext(os.path.basename(output_file))[0])}.{output_format}")
+                normalized_file = os.path.join(
+                    OUTPUT_DIR,
+                    f"{sanitize_filename(os.path.splitext(os.path.basename(output_file))[0])}.{output_format}"
+                )
                 if output_file.endswith(f".{output_format}") and output_file != normalized_file:
                     shutil.copy(output_file, normalized_file)
                 elif output_file != normalized_file:
@@ -439,15 +438,17 @@ def run_command_and_process_files(
                     sf.write(normalized_file, audio.T if audio.ndim > 1 else audio, sr)
                 else:
                     normalized_file = output_file
-                normalized_outputs.append(normalized_file)
+                normalized_results.append((label, normalized_file))
             else:
-                normalized_outputs.append(output_file)
+                normalized_results.append((label, output_file))
 
-        # Apollo processing
+        # Apollo processing (label korunarak path listesi uzerinde)
         if use_apollo:
             yield {"progress": 80, "status": "Enhancing with Apollo...", "outputs": None}
-            normalized_outputs = process_with_apollo(
-                output_files=normalized_outputs,
+            _labels = [l for l, _ in normalized_results]
+            _paths = [p for _, p in normalized_results]
+            _enhanced = process_with_apollo(
+                output_files=_paths,
                 output_dir=OUTPUT_DIR,
                 apollo_chunk_size=apollo_chunk_size,
                 apollo_overlap=apollo_overlap,
@@ -459,18 +460,19 @@ def run_command_and_process_files(
                 total_progress_start=80,
                 total_progress_end=100
             )
+            normalized_results = list(zip(_labels, _enhanced))
 
-        # Final yield with outputs
-        yield {"progress": 100, "status": "Separation complete", "outputs": tuple(normalized_outputs)}
+        # Final yield: (label, yol) listesi
+        yield {"progress": 100, "status": "Separation complete", "outputs": normalized_results}
 
     except subprocess.CalledProcessError as e:
         print(f"Subprocess failed, code: {e.returncode}: {e.stderr}")
-        yield {"progress": 0, "status": f"Error: {e.stderr}", "outputs": (None,) * 16}
+        yield {"progress": 0, "status": f"Error: {e.stderr}", "outputs": []}
     except Exception as e:
         print(f"run_command_and_process_files error: {str(e)}")
         import traceback
         traceback.print_exc()
-        yield {"progress": 0, "status": f"Error: {str(e)}", "outputs": (None,) * 16}
+        yield {"progress": 0, "status": f"Error: {str(e)}", "outputs": []}
 
 
 
@@ -535,11 +537,7 @@ def process_audio(
         if input_audio_file is not None:
             audio_path = input_audio_file.name if hasattr(input_audio_file, 'name') else input_audio_file
         else:
-            yield (
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                "No audio file provided",
-                update_progress_html("No input provided", 0)
-            )
+            yield ([], "No audio file provided", update_progress_html("No input provided", 0))
             return
 
         os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -592,11 +590,7 @@ def process_audio(
         shutil.copy(audio_path, dest_path)
 
         # Yield status for model loading
-        yield (
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            f"Loading model: {clean_model_name}...",
-            update_progress_html(f"Loading model: {clean_model_name}", 0)
-        )
+        yield ([], f"Loading model: {clean_model_name}...", update_progress_html(f"Loading model: {clean_model_name}", 0))
         
         # Get model configuration with cleaned model name (downloads if needed)
         model_type, config_path, start_check_point = get_model_config(clean_model_name, inference_chunk_size, inference_overlap)
@@ -638,70 +632,51 @@ def process_audio(
             if update.get("outputs") is not None:
                 outputs = update["outputs"]
             # Yield progress update to Gradio
-            yield (
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                update["status"],
-                update_progress_html(update["status"], update["progress"])
-            )
+            yield ([], update["status"], update_progress_html(update["status"], update["progress"]))
 
-        if outputs is None or all(output is None for output in outputs):
-            raise ValueError("run_command_and_process_files returned None or all None outputs")
+        if not outputs:
+            raise ValueError("run_command_and_process_files returned no outputs")
 
         # Apply Matchering (if enabled)
         if use_matchering:
-            # Yield progress update for Matchering
-            yield (
-                None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-                "Applying Matchering...",
-                update_progress_html("Applying Matchering...", 90)
-            )
+            yield ([], "Applying Matchering...", update_progress_html("Applying Matchering...", 90))
 
             # Find clean segment from original audio
             segment_start, segment_end, segment_audio = find_clear_segment(audio_path)
             segment_path = os.path.join(tempfile.gettempdir(), "matchering_segment.wav")
             save_segment(segment_audio, 44100, segment_path)
 
-            # Process each output with Matchering
-            mastered_outputs = []
-            for output in outputs:
+            # Process each output with Matchering ((label, yol) korunarak)
+            mastered = []
+            for label, output in outputs:
                 if output and os.path.exists(output):
                     output_base = sanitize_filename(os.path.splitext(os.path.basename(output))[0])
                     mastered_path = os.path.join(OUTPUT_DIR, f"{output_base}_mastered.wav")
-                    mastered_output = run_matchering(
+                    run_matchering(
                         reference_path=segment_path,
                         target_path=output,
                         output_path=mastered_path,
                         passes=matchering_passes,
                         bit_depth=24
                     )
-                    mastered_outputs.append(mastered_path)
+                    mastered.append((label, mastered_path))
                 else:
-                    mastered_outputs.append(output)
+                    mastered.append((label, output))
 
             # Clean up segment file
             if os.path.exists(segment_path):
                 os.remove(segment_path)
 
-            outputs = tuple(mastered_outputs)
+            outputs = mastered
 
-        # Final yield with all outputs
-        yield (
-            outputs[0], outputs[1], outputs[2], outputs[3], outputs[4], outputs[5], outputs[6],
-            outputs[7], outputs[8], outputs[9], outputs[10], outputs[11], outputs[12], outputs[13],
-            outputs[14], outputs[15],
-            "Audio processing completed",
-            update_progress_html("Audio processing completed", 100)
-        )
+        # Final yield: dinamik grid icin (label, yol) listesi
+        yield (outputs, "Audio processing completed", update_progress_html("Audio processing completed", 100))
 
     except Exception as e:
         print(f"process_audio error: {str(e)}")
         import traceback
         traceback.print_exc()
-        yield (
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            f"Error occurred: {str(e)}",
-            update_progress_html("Error occurred", 0)
-        )
+        yield ([], f"Error occurred: {str(e)}", update_progress_html("Error occurred", 0))
 
 def ensemble_audio_fn(files, method, weights, progress=gr.Progress()):
     try:

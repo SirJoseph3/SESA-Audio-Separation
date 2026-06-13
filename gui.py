@@ -517,39 +517,21 @@ def create_interface():
                         )
 
                     with gr.Column(scale=2, min_width=800):
-                        with gr.Tabs():
-                            with gr.Tab(i18n("main_tab")) as main_tab:
-                                with gr.Column():
-                                    original_audio = gr.Audio(label=i18n("original"), interactive=False)
-                                    with gr.Row():
-                                        vocals_audio = gr.Audio(label=i18n("vocals"))
-                                        instrumental_audio = gr.Audio(label=i18n("instrumental_output"))
-                                        other_audio = gr.Audio(label=i18n("other"))
+                        # Orijinal (yuklenen) ses - her zaman ustte sabit
+                        original_audio = gr.Audio(label=i18n("original"), interactive=False)
 
-                            with gr.Tab(i18n("details_tab")) as details_tab:
-                                with gr.Column():
-                                    with gr.Row():
-                                        male_audio = gr.Audio(label=i18n("male"))
-                                        female_audio = gr.Audio(label=i18n("female"))
-                                        speech_audio = gr.Audio(label=i18n("speech"))
-                                    with gr.Row():
-                                        drum_audio = gr.Audio(label=i18n("drums"))
-                                        bass_audio = gr.Audio(label=i18n("bass"))
-                                    with gr.Row():
-                                        effects_audio = gr.Audio(label=i18n("effects"))
+                        # Model ciktilarinin (label, yol) listesi -> dinamik grid kaynagi
+                        results_state = gr.State([])
 
-                            with gr.Tab(i18n("advanced_tab")) as advanced_tab:
-                                with gr.Column():
-                                    with gr.Row():
-                                        phaseremix_audio = gr.Audio(label=i18n("phase_remix"))
-                                        dry_audio = gr.Audio(label=i18n("dry"))
-                                    with gr.Row():
-                                        music_audio = gr.Audio(label=i18n("music"))
-                                        karaoke_audio = gr.Audio(label=i18n("karaoke"))
-                                        bleed_audio = gr.Audio(label=i18n("bleed"))
-                                    with gr.Row():
-                                        mid_audio = gr.Audio(label="Mid")
-                                        side_audio = gr.Audio(label="Side")
+                        @gr.render(inputs=results_state)
+                        def render_separation_outputs(results):
+                            if not results:
+                                return
+                            # 2 sutunlu grid
+                            for i in range(0, len(results), 2):
+                                with gr.Row():
+                                    for label, path in results[i:i + 2]:
+                                        gr.Audio(label=label, value=path, interactive=False)
 
                         separation_progress_html = gr.HTML(
                             value=f"""
@@ -821,15 +803,12 @@ def create_interface():
                                 original_audio2 = gr.Audio(
                                     label=i18n("original_audio"),
                                     interactive=False,
-                                    every=1,
-                                    elem_id="original_audio_player",
-                                    streaming=True
+                                    elem_id="original_audio_player"
                                 )
                             with gr.Tab(i18n("ensemble_result_tab")) as ensemble_result_tab:
                                 auto_output_audio = gr.Audio(
                                     label=i18n("output_preview"),
-                                    interactive=False,
-                                    streaming=True
+                                    interactive=False
                                 )
                                 refresh_output_btn = gr.Button(i18n("refresh_output"), variant="secondary")
 
@@ -904,8 +883,7 @@ def create_interface():
                                 ensemble_output_audio = gr.Audio(
                                     label=i18n("ensembled_output"),
                                     interactive=False,
-                                    elem_id="output-audio",
-                                    streaming=True
+                                    elem_id="output-audio"
                                 )
                             with gr.Tab(i18n("processing_log_tab")) as processing_log_tab:
                                 with gr.Accordion(i18n("processing_details"), open=True, elem_id="log-accordion"):
@@ -994,8 +972,7 @@ def create_interface():
                     with gr.Column(scale=2, min_width=600):
                         pf_output_audio = gr.Audio(
                             label=i18n("phase_fixed_output"),
-                            interactive=False,
-                            streaming=True
+                            interactive=False
                         )
                         pf_status = gr.Textbox(
                             label=i18n("status"),
@@ -1500,10 +1477,7 @@ def create_interface():
                 chunk_size_mode, chunk_size_custom
             ],
             outputs=[
-                vocals_audio, instrumental_audio, phaseremix_audio, drum_audio, karaoke_audio,
-                other_audio, bass_audio, effects_audio, speech_audio, bleed_audio, music_audio,
-                dry_audio, male_audio, female_audio,
-                mid_audio, side_audio,
+                results_state,
                 separation_process_status, separation_progress_html
             ]
         )
